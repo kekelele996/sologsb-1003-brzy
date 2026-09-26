@@ -17,6 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { analyzeDocument, extractVariables, parseMarkdown, renderTargetMarkdown } from '@/lib/markdown'
 import { seedConflicts, seedDiscussions, seedDocument, seedGlossary, seedHistory, seedSegments } from '@/lib/seed'
+import { mergeUpstreamSegments } from '@/lib/sync'
 import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -30,6 +31,9 @@ const statusClass: Record<SegmentStatus, string> = {
 }
 const issueLabel: Record<TranslationIssue['type'], string> = {
   'missing-translation': '漏译', 'missing-variable': '变量缺失', 'link-mismatch': '链接不一致', glossary: '术语不一致', 'code-format': '代码格式',
+}
+const historyActionLabel: Record<HistoryEntry['action'], string> = {
+  edit: '编辑', confirm: '确认', return: '退回', 'resolve-conflict': '解决冲突', import: '导入', discussion: '讨论', sync: '源文同步',
 }
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -57,6 +61,7 @@ export function LocalizationWorkbench() {
   const [hydrated, setHydrated] = useState(false)
   const [past, setPast] = useState<EditorSnapshot[]>([])
   const [future, setFuture] = useState<EditorSnapshot[]>([])
+  const [syncSummary, setSyncSummary] = useState<{ added: number; updated: number; removed: number; at: number } | null>(null)
 
   const documentQuery = useQuery({
     queryKey: ['localization-document'],
@@ -113,6 +118,24 @@ export function LocalizationWorkbench() {
       const response = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       if (!response.ok) throw new Error('review failed')
       return response.json()
+    },
+  })
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch('/api/document/upstream')
+      if (!response.ok) throw new Error('sync failed')
+      return response.json() as Promise<{ documentId: string; fetchedAt: number; segments: Segment[] }>
+    },
+    onSuccess: (data) => {
+      const result = mergeUpstreamSegments(segments, data.segments)
+      const removedIds = new Set(result.removedIds)
+      replaceState({ segments: result.segments, discussions: discussions.filter((item) => !removedIds.has(item.segmentId)) })
+      result.updated.forEach((update) => pushHistoryEntry(update.segmentId, 'sync', update.before, update.after, '源文同步'))
+      pushHistoryEntry(result.segments[0]?.id ?? '', 'sync', '', `同步完成：新增 ${result.addedCount}、更新 ${result.updated.length}、移除 ${result.removedIds.length}`, '源文同步')
+      setConflicts((current) => current.filter((item) => !removedIds.has(item.segmentId)))
+      setSelectedForReturn((current) => new Set(Array.from(current).filter((id) => !removedIds.has(id))))
+      if (removedIds.has(selectedSegmentId) && result.segments[0]) setSelectedSegmentId(result.segments[0].id)
+      setSyncSummary({ added: result.addedCount, updated: result.updated.length, removed: result.removedIds.length, at: Date.now() })
     },
   })
 
@@ -310,6 +333,7 @@ export function LocalizationWorkbench() {
             <Button variant="outline" size="sm" className="border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:text-white" onClick={redo} disabled={!future.length}><RotateCw className="h-4 w-4" />重做</Button>
             <input ref={fileInput} type="file" accept=".md,.markdown,text/markdown" className="hidden" onChange={(event) => void importMarkdown(event)} />
             <Button variant="outline" size="sm" className="border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:text-white" onClick={() => fileInput.current?.click()}><Import className="h-4 w-4" />导入</Button>
+            <Button variant="outline" size="sm" className="border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:text-white" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>{syncMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}同步源文</Button>
             <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}><Save className="h-4 w-4" />保存</Button>
           </div>
         </div>
@@ -326,6 +350,17 @@ export function LocalizationWorkbench() {
           <Button size="sm" variant="outline" onClick={exportMarkdown}><Download className="h-4 w-4" />导出译文</Button>
         </div>
       </div>
+
+      {syncSummary && <div className="border-b border-blue-200 bg-blue-50 px-4 py-2.5 lg:px-6">
+        <div className="mx-auto flex max-w-[1800px] flex-wrap items-center gap-x-4 gap-y-1 text-xs text-blue-800">
+          <span className="flex items-center gap-1.5 font-semibold"><RefreshCw className="h-3.5 w-3.5" />源文同步完成</span>
+          <span>新增 <b>{syncSummary.added}</b> 个片段（已进入草稿）</span>
+          <span>更新 <b>{syncSummary.updated}</b> 个片段（译文已清空并转为待处理）</span>
+          <span>移除 <b>{syncSummary.removed}</b> 个片段</span>
+          <span className="text-blue-500">改前改后已写入修改历史，保存后刷新页面仍会保留。</span>
+          <button className="ml-auto rounded p-0.5 text-blue-500 hover:bg-blue-100 hover:text-blue-700" aria-label="关闭同步结果" onClick={() => setSyncSummary(null)}><X className="h-3.5 w-3.5" /></button>
+        </div>
+      </div>}
 
       <main className="workbench-grid mx-auto grid max-w-[1800px] grid-cols-[270px_minmax(620px,1fr)_340px] gap-4 p-4 lg:p-5">
         <aside className="workbench-left space-y-4">
@@ -412,7 +447,7 @@ export function LocalizationWorkbench() {
                 <div className="mt-4 space-y-3">{selectedDiscussions.map((discussion) => <div key={discussion.id} className="rounded-lg border p-3"><div className="flex items-center justify-between"><b className="text-xs text-slate-800">{discussion.author}</b><Badge variant={discussion.resolved ? 'success' : 'warning'}>{discussion.resolved ? '已解决' : '待回应'}</Badge></div><p className="mt-2 text-xs leading-5 text-slate-600">{discussion.body}</p><p className="mt-2 text-[10px] text-slate-400">{hydrated ? new Date(discussion.createdAt).toLocaleString('zh-CN') : null}</p></div>)}{!selectedDiscussions.length && <p className="py-8 text-center text-xs text-slate-400">当前片段还没有讨论</p>}</div>
               </TabsContent>
               <TabsContent value="issues" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-2">{issues.map((issue) => <button key={issue.id} onClick={() => selectAndScroll(issue.segmentId)} className="w-full rounded-lg border p-3 text-left hover:border-amber-300 hover:bg-amber-50"><div className="flex items-center justify-between"><Badge variant={issue.severity === 'error' ? 'destructive' : 'warning'}>{issueLabel[issue.type]}</Badge><span className="text-[10px] text-slate-400">#{segments.find((item) => item.id === issue.segmentId)?.index}</span></div><p className="mt-2 text-xs leading-5 text-slate-600">{issue.message}</p></button>)}{!issues.length && <p className="py-8 text-center text-xs text-emerald-600">没有待处理问题</p>}</div></TabsContent>
-              <TabsContent value="history" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-0">{history.map((entry) => <div key={entry.id} className="relative border-l border-slate-200 pb-4 pl-4"><span className="absolute -left-1.5 top-0 h-3 w-3 rounded-full border-2 border-white bg-blue-500" /><div className="flex items-center justify-between"><b className="text-[11px] text-slate-700">{entry.author}</b><span className="text-[9px] text-slate-400">{hydrated ? new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : null}</span></div><p className="mt-1 text-[10px] text-slate-500">片段 #{segments.find((item) => item.id === entry.segmentId)?.index ?? '—'} · {entry.action}</p>{entry.after && <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">{entry.after}</p>}</div>)}</div></TabsContent>
+              <TabsContent value="history" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-0">{history.map((entry) => <div key={entry.id} className="relative border-l border-slate-200 pb-4 pl-4"><span className="absolute -left-1.5 top-0 h-3 w-3 rounded-full border-2 border-white bg-blue-500" /><div className="flex items-center justify-between"><b className="text-[11px] text-slate-700">{entry.author}</b><span className="text-[9px] text-slate-400">{hydrated ? new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : null}</span></div><p className="mt-1 text-[10px] text-slate-500">片段 #{segments.find((item) => item.id === entry.segmentId)?.index ?? '—'} · {historyActionLabel[entry.action]}</p>{entry.action === 'sync' && entry.before ? <div className="mt-1 space-y-1"><p className="line-clamp-2 text-[10px] leading-4 text-slate-400"><span className="font-semibold text-slate-500">改前：</span>{entry.before}</p><p className="line-clamp-2 text-[10px] leading-4 text-blue-600"><span className="font-semibold">改后：</span>{entry.after}</p></div> : entry.after ? <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">{entry.after}</p> : null}</div>)}</div></TabsContent>
               <TabsContent value="conflicts" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-3">{conflicts.map((conflict) => <div key={conflict.id} className="overflow-hidden rounded-lg border border-red-200"><div className="bg-red-50 px-3 py-2"><b className="text-xs text-red-800">片段 #{segments.find((item) => item.id === conflict.segmentId)?.index} 存在并发修改</b><p className="mt-1 text-[10px] text-red-600">{conflict.remoteAuthor} 修改了同一句</p></div><div className="space-y-2 p-3"><div><span className="text-[9px] font-semibold text-slate-400">本地版本</span><p className="mt-1 text-[11px] leading-5 text-slate-600">{conflict.localText}</p></div><div><span className="text-[9px] font-semibold text-slate-400">远端版本</span><p className="mt-1 text-[11px] leading-5 text-blue-700">{conflict.remoteText}</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => resolveConflict(conflict, 'local')}>保留本地</Button><Button size="sm" onClick={() => resolveConflict(conflict, 'remote')}>采用远端</Button></div></div></div>)}{!conflicts.length && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-center text-xs text-emerald-700"><Check className="mx-auto mb-2 h-5 w-5" />所有冲突已解决</div>}</div></TabsContent>
             </Tabs>
           </Card>

@@ -1,3 +1,4 @@
+import { parseMarkdown } from './markdown'
 import type { Discussion, GlossaryTerm, HistoryEntry, LocalizationDocument, Segment, TranslationConflict } from './types'
 
 export const seedSegments: Segment[] = [
@@ -48,3 +49,23 @@ export const seedDocument: LocalizationDocument = {
   glossary: seedGlossary,
   discussions: seedDiscussions,
 }
+
+/**
+ * 上游文档改版后的新版源文（由 /api/document/upstream 返回）：
+ * 第 2、5 段原文有改动，删除原第 8 段，末尾新增 Rollback 标题与段落，其余保持不变。
+ */
+export const upstreamMarkdown = [
+  '# Deployment Guide',
+  'This guide explains how to deploy {{project_name}} version {{version}} to a Kubernetes cluster with Helm.',
+  '## Prerequisites',
+  'Before you begin, review the [configuration reference](https://docs.example.com/config) and install `kubectl`.',
+  'The operator requires cluster-admin privileges during installation. Production clusters must use a dedicated service account.',
+  '```bash\nhelm upgrade --install {{release_name}} oci://registry.example.com/operator --version {{version}}\n```',
+  'Set `replicaCount` to `{replica_count}` in your values file.',
+  'See [Troubleshooting](https://docs.example.com/troubleshooting#connectivity) for detailed diagnostics.',
+  '## Upgrade Notes',
+  '## Rollback',
+  'To roll back a failed release, run `helm rollback {{release_name}}` and verify the pod status.',
+].join('\n\n')
+
+export const upstreamSegments: Segment[] = parseMarkdown(upstreamMarkdown)
